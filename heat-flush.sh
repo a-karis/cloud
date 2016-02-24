@@ -1,21 +1,34 @@
 #!/bin/bash
 
 function flush_heat() {
-  for table in resource_data resource event stack;do 
+  echo "Flushing heat ..."
+  for table in stack_lock resource_data resource event stack;do 
     mysql heat -e "delete from $table"
   done
 }
 
 flush_ironic() {
+  echo "Flushing ironic ..."
   for table in ports nodes;do
     mysql ironic -e "delete from $table"
   done
 }
 
+state_reset_ironic() {
+  echo "Resetting ironic state ..."
+  mysql ironic -e "update nodes set provision_state = 'available' WHERE maintenance = 0"
+}
+
 flush_nova() {
+  echo "Flushing nova ..."
   for table in instance_faults instance_system_metadata instance_info_caches instance_extra instance_actions_events instance_actions block_device_mapping instances compute_nodes;do
     mysql nova -e "delete from $table"
   done
+}
+
+delete_nova() {
+  echo "Deleting nova ..."
+  nova list | grep -v 'ID' | awk '{print $2}' | xargs -I {} nova delete {}
 }
 
 _get_ctlplane_network() {
@@ -44,7 +57,7 @@ _is_on_net() {
 }
 
 # flush all ports with the exception of ctlplane port DHCP
-_flush_neutron_ports() {
+_delete_neutron_ports() {
   ctl_plane_network=$(_get_ctlplane_network)
   neutron port-list | egrep '[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}' | while read line;do
     ip_address=`echo $line | awk -F '"' '{print $(NF-1)}'`
@@ -60,30 +73,49 @@ _flush_neutron_ports() {
 }
 
 # flush all nets with exception of DHCP
-_flush_neutron_nets() {
+_delete_neutron_nets() {
   neutron net-list | grep -v ctlplane | awk '{print $2}' | xargs -I {} neutron net-delete {} 2>/dev/null
 }
 
-flush_neutron() {
-  _flush_neutron_ports
-  _flush_neutron_nets
+delete_neutron() {
+  echo "Deleting neutron ..."
+  _delete_neutron_ports
+  _delete_neutron_nets
 }
 
+if [ "$1" = '-h' ];then
+  echo "Usage: --cleanup | --heat-flush --ironic-flush --nova-flush --nova-delete --neutron-delete --ironic-state-reset"
+  exit 0
+fi
+
 for arg in "$@";do
-  if [ $arg = '--heat' ];then
-    echo "Flushing heat ..."
+  if [ $arg = '--cleanup' ];then
+    flush_heat
+    delete_nova 
+    state_reset_ironic
+    delete_neutron
+  fi
+  if [ $arg = '--heat-flush' ];then
     flush_heat
   fi
-  if [ $arg == '--ironic' ];then
-    echo "Flushing ironic ..."
+  if [ $arg == '--ironic-flush' ];then
     flush_ironic
   fi
-  if [ $arg == '--nova' ];then
-    echo "Flushing nova ..."
+  if [ $arg == '--ironic-state-reset' ];then
+    state_reset_ironic
+  fi
+  if [ $arg == '--nova-flush' ];then
     flush_nova
   fi
-  if [ $arg == '--neutron' ];then
-    echo "Flushing neutron ..."
-    flush_neutron
+  if [ $arg == '--nova-delete' ];then
+    delete_nova
   fi
+  if [ $arg == '--neutron-delete' ];then
+    delete_neutron
+  fi
+
+  echo 'Restarting ironic ...'
+  sudo openstack-service restart ironic
+  echo 'Restarting heat ...'
+  sudo openstack-service restart heat
 done
